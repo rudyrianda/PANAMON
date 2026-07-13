@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.Data.SqlClient;
 using System.Text.Json;
@@ -13,8 +13,10 @@ namespace MonitoringSystem.Pages.Shared
 
         public List<ProductName> listProducts = new List<ProductName>();
         public List<ProductionRecord> listRecords = new List<ProductionRecord>();
+        public List<SapPlanRecord> listSapPlans = new List<SapPlanRecord>(); // ← BARU: SAP Plan dari Excel
         private readonly IConfiguration _configuration;
         private string connectionString;
+        private static readonly string[] ShiftLabels = { "NS", "1", "2", "3" };
 
         public string? ProductNames { get; set; }
         public string? MachineCode { get; set; }
@@ -33,7 +35,6 @@ namespace MonitoringSystem.Pages.Shared
         [BindProperty(SupportsGet = true)]
         public List<string>? FilterShifts { get; set; }
 
-
         bool allFieldsEmpty = true;
 
         public ProductionPlanModel(IConfiguration configuration, IWebHostEnvironment webHostEnvironment)
@@ -42,16 +43,16 @@ namespace MonitoringSystem.Pages.Shared
             connectionString = _configuration.GetConnectionString("DefaultConnection") ?? "";
             _webHostEnvironment = webHostEnvironment;
         }
+
         public void OnGet()
         {
             if (string.IsNullOrEmpty(FilterMachineCode)) FilterMachineCode = "MCH1-01";
-
             CurrentDate = FilterDate.HasValue ? FilterDate.Value.Date : DateTime.Now.Date;
-
             getListModelName();
             InsertProductionPlanNow();
             getTotalQuantity();
         }
+
 
         public IActionResult getListModelName()
         {
@@ -90,7 +91,6 @@ namespace MonitoringSystem.Pages.Shared
                 using (var connection = new SqlConnection(this.connectionString))
                 {
                     connection.Open();
-
                     string query = @"
                     SELECT 
                         SUM(PR.Quantity) as TotalNormal, 
@@ -111,10 +111,8 @@ namespace MonitoringSystem.Pages.Shared
                             {
                                 int normal = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
                                 int ovt = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
-
                                 TotalQuantity = normal.ToString();
                                 TotalOvertime = ovt.ToString();
-
                                 GrandTotal = (normal + ovt).ToString();
                             }
                             else
@@ -141,6 +139,7 @@ namespace MonitoringSystem.Pages.Shared
                 {
                     connection.Open();
 
+                    // Pastikan ProductionPlan untuk tanggal ini ada
                     string queryCheck = @"SELECT COUNT(1) FROM ProductionPlan WHERE CurrentDate = @CurrentDate;";
                     using (SqlCommand commandCheck = new SqlCommand(queryCheck, connection))
                     {
@@ -157,19 +156,41 @@ namespace MonitoringSystem.Pages.Shared
                         }
                     }
 
-                    // AMBIL DATA (SELECT) DENGAN FILTER
-                    string shiftCondition = "";
-                    if (FilterShifts != null && FilterShifts.Count > 0)
+                    // ── 1. AMBIL SAP PLAN (dari tabel SapPlan) ──────────────────────────
+                    string querySapPlan = @"
+                        SELECT SP.Id, SP.ProductName, SP.SapPlanNormal, SP.SapPlanOvertime, SP.Shift
+                        FROM SapPlan SP
+                        INNER JOIN ProductionPlan PP ON SP.PlanId = PP.Id
+                        WHERE PP.CurrentDate = @CurrentDate
+                        AND SP.MachineCode = @MachineCode
+                        ORDER BY SP.Id ASC;";
+
+                    using (SqlCommand cmdSap = new SqlCommand(querySapPlan, connection))
                     {
-                        // Logic filter shift agak kompleks karena data di DB string (csv). 
-                        // Untuk simpelnya, kita filter di Memory atau asumsikan user ingin melihat semua data mesin tersebut.
-                        // Disini saya filter berdasarkan Machine Code dulu.
+                        cmdSap.Parameters.AddWithValue("@CurrentDate", CurrentDate);
+                        cmdSap.Parameters.AddWithValue("@MachineCode", FilterMachineCode ?? "MCH1-01");
+
+                        using (SqlDataReader reader = cmdSap.ExecuteReader())
+                        {
+                            while (reader.Read())
+                            {
+                                listSapPlans.Add(new SapPlanRecord
+                                {
+                                    Id = reader.GetInt32(0),
+                                    ModelName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                                    SapPlanNormal = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                                    SapPlanOvertime = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                                    Shift = reader.IsDBNull(4) ? "NS" : reader.GetString(4)   // ← BARU
+                                });
+                            }
+                        }
                     }
 
+                    // ── 2. AMBIL CHANGE PLAN (dari tabel ProductionRecords / web input) ─
                     string querySelectAllData = @"
                         SELECT 
                             PR.Id, PR.ProductName, PR.Quantity, MD.QtyHour, 
-                            ROUND(CAST(PR.Quantity As float)/CAST(MD.QtyHour AS float), 2) AS Hour, 
+                            ROUND(CAST(PR.Quantity As float)/NULLIF(CAST(MD.QtyHour AS float),0), 2) AS Hour, 
                             PR.Lot, PR.Remark,
                             PR.Overtime, PR.NoDirectOfWorker, PR.NoDirectOfWorkerOvertime, PR.Shift
                         FROM ProductionRecords PR
@@ -177,7 +198,7 @@ namespace MonitoringSystem.Pages.Shared
                         INNER JOIN ProductionPlan PP ON PR.PlanId = PP.Id 
                         WHERE PP.CurrentDate = @CurrentDate 
                         AND PR.MachineCode = @MachineCode
-                        ORDER BY PR.Id DESC;";
+                        ORDER BY PR.Id ASC;";
 
                     using (SqlCommand commandSelectAll = new SqlCommand(querySelectAllData, connection))
                     {
@@ -196,21 +217,28 @@ namespace MonitoringSystem.Pages.Shared
                                 record.Hour = dataReader.IsDBNull(4) ? 0 : dataReader.GetDouble(4);
                                 record.Lot = dataReader.IsDBNull(5) ? "" : dataReader.GetString(5);
                                 record.Remark = dataReader.IsDBNull(6) ? "" : dataReader.GetString(6);
-
-                                // Mapping Kolom Baru
                                 record.Overtime = dataReader.IsDBNull(7) ? null : dataReader.GetInt32(7);
                                 record.NoDirectOfWorker = dataReader.IsDBNull(8) ? null : dataReader.GetInt32(8);
                                 record.NoDirectOfWorkerOvertime = dataReader.IsDBNull(9) ? null : dataReader.GetInt32(9);
                                 record.Shift = dataReader.IsDBNull(10) ? "" : dataReader.GetString(10);
+
+                                // ── Cari SAP Plan yang cocok berdasarkan ProductName ──
+                                var matchingSap = listSapPlans.FirstOrDefault(s =>
+                                    s.ModelName?.Trim().ToLower() == record.ModelName?.Trim().ToLower() &&
+                                    s.Shift == record.Shift);   // ← TAMBAHAN
+                                if (matchingSap != null)
+                                {
+                                    record.SapPlanNormal = matchingSap.SapPlanNormal;
+                                    record.SapPlanOvertime = matchingSap.SapPlanOvertime;
+                                }
 
                                 listRecords.Add(record);
                             }
                         }
                     }
 
+                    // ── 3. AMBIL COMMENT ────────────────────────────────────────────────
                     string commentColumn = (FilterMachineCode == "MCH1-02") ? "Comment_CS" : "Comment_CU";
-
-                    // Gunakan variable commentColumn di dalam query
                     string querySelectComment = $"SELECT {commentColumn} FROM ProductionPlan WHERE CurrentDate = @CurrentDate";
 
                     using (SqlCommand commandSelectComment = new SqlCommand(querySelectComment, connection))
@@ -262,7 +290,6 @@ namespace MonitoringSystem.Pages.Shared
             catch (Exception ex)
             {
                 Console.WriteLine("Exception: " + ex.ToString());
-
                 TempData["StatusMessage"] = "error";
                 TempData["Message"] = "Error inserting product: " + ex.Message;
                 return Page();
@@ -270,18 +297,17 @@ namespace MonitoringSystem.Pages.Shared
         }
 
         public IActionResult OnPostInsertProductionRecord(
-    List<int?> IdModel,
-    List<string> ModelName,
-    List<int?> Quantity,
-    List<int?> QtyHour,
-    List<string> Lot,
-    List<string> Remark,
-    List<int?> Overtime,
-    List<int?> NoOfDirectWorker,
-    List<int?> NoOfDirectWorkerOvertime,
-    string Comment,
-    DateTime TargetDate
-)
+            List<int?> IdModel,
+            List<string> ModelName,
+            List<int?> Quantity,
+            List<int?> QtyHour,
+            List<string> Lot,
+            List<string> Remark,
+            List<int?> Overtime,
+            List<int?> NoOfDirectWorker,
+            List<int?> NoOfDirectWorkerOvertime,
+            string Comment,
+            DateTime TargetDate)
         {
             int planId = 0;
             CurrentDate = TargetDate != DateTime.MinValue ? TargetDate : DateTime.Now.Date;
@@ -289,7 +315,6 @@ namespace MonitoringSystem.Pages.Shared
             string filterMachine = Request.Form["FilterMachineCode"];
             if (!string.IsNullOrEmpty(filterMachine)) FilterMachineCode = filterMachine;
 
-            // Flag untuk tracking status simpan
             bool hasInvalidRows = false;
             int savedRowsCount = 0;
 
@@ -328,50 +353,64 @@ namespace MonitoringSystem.Pages.Shared
                         }
                     }
 
+                    // ── TAMBAHAN: Kumpulkan Id existing dari form, lalu hapus yang tidak ada ──
+                    var submittedIds = new List<int>();
+                    for (int k = 0; k < ModelName.Count; k++)
+                    {
+                        string rawIdK = Request.Form[$"IdModel[{k}]"];
+                        if (int.TryParse(rawIdK, out int pid) && pid > 0)
+                            submittedIds.Add(pid);
+                    }
+
+                    if (submittedIds.Count > 0)
+                    {
+                        string inClause = string.Join(",", submittedIds);
+                        string queryDelOld = $@"DELETE FROM ProductionRecords 
+                                                WHERE PlanId = @PlanId 
+                                                AND MachineCode = @Mc2 
+                                                AND Id NOT IN ({inClause})";
+                        using (SqlCommand cmdDel = new SqlCommand(queryDelOld, connection))
+                        {
+                            cmdDel.Parameters.AddWithValue("@PlanId", planId);
+                            cmdDel.Parameters.AddWithValue("@Mc2", FilterMachineCode ?? "MCH1-01");
+                            cmdDel.ExecuteNonQuery();
+                        }
+                    }
+                    // ── AKHIR TAMBAHAN ──
+
                     for (int i = 0; i < ModelName.Count; i++)
                     {
                         string safeModelName = (ModelName != null && ModelName.Count > i) ? ModelName[i] : "";
                         int? safeQty = (Quantity != null && Quantity.Count > i) ? Quantity[i] : null;
                         int? safeWorker = (NoOfDirectWorker != null && NoOfDirectWorker.Count > i) ? NoOfDirectWorker[i] : null;
-
                         int? safeQtyHour = (QtyHour != null && QtyHour.Count > i) ? QtyHour[i] : null;
                         string safeLot = (Lot != null && Lot.Count > i) ? Lot[i] : null;
                         string safeRemark = (Remark != null && Remark.Count > i) ? Remark[i] : null;
                         int? safeOvertime = (Overtime != null && Overtime.Count > i) ? Overtime[i] : null;
                         int? safeWorkerOvt = (NoOfDirectWorkerOvertime != null && NoOfDirectWorkerOvertime.Count > i) ? NoOfDirectWorkerOvertime[i] : null;
 
-                        // Cek Apakah Baris Kosong Total (User tidak isi apa-apa) -> Skip Silent
                         bool isRowEmpty = string.IsNullOrEmpty(safeModelName) &&
                                           (!safeQty.HasValue || safeQty == 0) &&
                                           (!safeWorker.HasValue);
-
                         if (isRowEmpty) continue;
 
-                        // VALIDASI WAJIB: Product Name, Quantity, dan Worker Normal HARUS ADA
                         bool isRowValid = !string.IsNullOrEmpty(safeModelName) &&
                                           (safeQty.HasValue && safeQty > 0) &&
                                           safeWorker.HasValue;
-
                         if (!isRowValid)
                         {
-                            // Jika data tidak lengkap, tandai error dan LEWATI baris ini
                             hasInvalidRows = true;
                             continue;
                         }
 
-                        // LOGIC SHIFT OTOMATIS (Default "NS")
                         string shiftValue = "NS";
                         string shiftKey = $"Shift[{i}]";
                         if (Request.Form.ContainsKey(shiftKey))
                         {
-                            // Jika user mencentang checkbox, gunakan nilainya
                             shiftValue = string.Join(",", Request.Form[shiftKey]);
                         }
-                        // Double check jika string kosong, paksa "NS"
                         if (string.IsNullOrEmpty(shiftValue)) shiftValue = "NS";
 
-
-                        // Update Master Data QtyHour
                         if (safeQtyHour.HasValue && !string.IsNullOrEmpty(safeModelName))
                         {
                             string qUpdMaster = @"UPDATE MasterData SET QtyHour = @QtyHour WHERE ProductName = @ProductName;";
@@ -383,13 +422,13 @@ namespace MonitoringSystem.Pages.Shared
                             }
                         }
 
-                        // EKSEKUSI SQL (INSERT / UPDATE)
-                        int? safeId = (IdModel != null && IdModel.Count > i) ? IdModel[i] : null;
-
-                        // Tentukan Query
+                        string rawId = Request.Form[$"IdModel[{i}]"];
+                        int? safeId = int.TryParse(rawId, out int parsedId) && parsedId > 0 ? parsedId : (int?)null;
                         string querySQL = "";
+
                         if (safeId.HasValue && safeId > 0)
                         {
+                            // UPDATE: hanya update kolom Change Plan, TIDAK menyentuh SapPlan
                             querySQL = @"UPDATE ProductionRecords 
                                  SET ProductName=@Pn, Quantity=@Qty, Lot=@Lot, Remark=@Rem, 
                                      Overtime=@Ovt, NoDirectOfWorker=@WNorm, NoDirectOfWorkerOvertime=@WOvt, Shift=@Sh
@@ -397,9 +436,32 @@ namespace MonitoringSystem.Pages.Shared
                         }
                         else
                         {
-                            querySQL = @"INSERT INTO ProductionRecords 
-                                (PlanID, ProductName, MachineCode, Quantity, Lot, Remark, Overtime, NoDirectOfWorker, NoDirectOfWorkerOvertime, Shift) 
-                                VALUES (@Pid, @Pn, @Mc, @Qty, @Lot, @Rem, @Ovt, @WNorm, @WOvt, @Sh);";
+                            string queryFindExisting = @"SELECT TOP 1 Id FROM ProductionRecords 
+                                                          WHERE PlanId = @Pid AND ProductName = @Pn 
+                                                          AND MachineCode = @Mc";
+                            using (SqlCommand cmdFind = new SqlCommand(queryFindExisting, connection))
+                            {
+                                cmdFind.Parameters.AddWithValue("@Pid", planId);
+                                cmdFind.Parameters.AddWithValue("@Pn", safeModelName);
+                                cmdFind.Parameters.AddWithValue("@Mc", FilterMachineCode ?? "MCH1-01");
+                                var existingId = cmdFind.ExecuteScalar();
+
+                                if (existingId != null)
+                                {
+                                    safeId = (int)existingId;
+                                    querySQL = @"UPDATE ProductionRecords 
+                                                 SET ProductName=@Pn, Quantity=@Qty, Lot=@Lot, Remark=@Rem, 
+                                                     Overtime=@Ovt, NoDirectOfWorker=@WNorm, 
+                                                     NoDirectOfWorkerOvertime=@WOvt, Shift=@Sh
+                                                 WHERE Id=@Id";
+                                }
+                                else
+                                {
+                                    querySQL = @"INSERT INTO ProductionRecords 
+                                        (PlanID, ProductName, MachineCode, Quantity, Lot, Remark, Overtime, NoDirectOfWorker, NoDirectOfWorkerOvertime, Shift) 
+                                        VALUES (@Pid, @Pn, @Mc, @Qty, @Lot, @Rem, @Ovt, @WNorm, @WOvt, @Sh);";
+                                }
+                            }
                         }
 
                         using (SqlCommand cmd = new SqlCommand(querySQL, connection))
@@ -408,7 +470,6 @@ namespace MonitoringSystem.Pages.Shared
                             cmd.Parameters.AddWithValue("@Qty", safeQty);
                             cmd.Parameters.AddWithValue("@WNorm", safeWorker);
                             cmd.Parameters.AddWithValue("@Sh", shiftValue);
-
                             cmd.Parameters.AddWithValue("@Ovt", (object)safeOvertime ?? DBNull.Value);
                             cmd.Parameters.AddWithValue("@WOvt", (object)safeWorkerOvt ?? DBNull.Value);
                             cmd.Parameters.AddWithValue("@Lot", (object)safeLot ?? DBNull.Value);
@@ -439,32 +500,17 @@ namespace MonitoringSystem.Pages.Shared
 
                     if (savedRowsCount > 0)
                     {
-                        if (hasInvalidRows)
-                        {
-                            // Berhasil sebagian
-                            TempData["StatusMessage"] = "warning";
-                            TempData["Message"] = "Data Saved, but some rows were SKIPPED because Product Name, Quantity, or Normal Worker were empty.";
-                        }
-                        else
-                        {
-                            // Berhasil semua
-                            TempData["StatusMessage"] = "success";
-                            TempData["Message"] = "All Production Plan saved successfully!";
-                        }
+                        TempData["StatusMessage"] = hasInvalidRows ? "warning" : "success";
+                        TempData["Message"] = hasInvalidRows
+                            ? "Data Saved, but some rows were SKIPPED because Product Name, Quantity, or Normal Worker were empty."
+                            : "All Production Plan saved successfully!";
                     }
                     else
                     {
-                        // Tidak ada yang tersimpan sama sekali
-                        if (hasInvalidRows)
-                        {
-                            TempData["StatusMessage"] = "error";
-                            TempData["Message"] = "Action Failed! Please fill in Product Name, Quantity, and Worker (Normal) for at least one row.";
-                        }
-                        else
-                        {
-                            TempData["StatusMessage"] = "info";
-                            TempData["Message"] = "No data to save.";
-                        }
+                        TempData["StatusMessage"] = hasInvalidRows ? "error" : "info";
+                        TempData["Message"] = hasInvalidRows
+                            ? "Action Failed! Please fill in Product Name, Quantity, and Worker (Normal) for at least one row."
+                            : "No data to save.";
                     }
 
                     return RedirectToPage(new { FilterDate = CurrentDate.ToString("yyyy-MM-dd"), FilterMachineCode = FilterMachineCode });
@@ -491,32 +537,18 @@ namespace MonitoringSystem.Pages.Shared
                     {
                         commandDelete.Parameters.AddWithValue("@RecordId", recordId);
                         int rowsAffected = await commandDelete.ExecuteNonQueryAsync();
-                        if (rowsAffected > 0)
-                        {
-                            TempData["StatusMessage"] = "success";
-                            TempData["Message"] = "Data deleted successfully";
-                            return RedirectToPage();
-                        }
-                        else
-                        {
-                            TempData["StatusMessage"] = "error";
-                            TempData["Message"] = "Data not found";
-                            return RedirectToPage();
-                        }
+                        TempData["StatusMessage"] = rowsAffected > 0 ? "success" : "error";
+                        TempData["Message"] = rowsAffected > 0 ? "Data deleted successfully" : "Data not found";
+                        return RedirectToPage();
                     }
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine("Exception: " + ex.ToString());
-
                 TempData["StatusMessage"] = "error";
                 TempData["Message"] = "Error deleting records: " + ex.Message;
-                return RedirectToPage(new
-                {
-                    FilterDate = CurrentDate.ToString("yyyy-MM-dd"),
-                    FilterMachineCode = FilterMachineCode
-                });
+                return RedirectToPage(new { FilterDate = CurrentDate.ToString("yyyy-MM-dd"), FilterMachineCode = FilterMachineCode });
             }
         }
 
@@ -539,34 +571,21 @@ namespace MonitoringSystem.Pages.Shared
                         }
                     }
 
+                    // Hanya delete ProductionRecords (Change Plan), TIDAK hapus SapPlan
                     string queryDelete = "DELETE FROM ProductionRecords WHERE PlanId = @PlanId;";
                     using (SqlCommand commandDelete = new SqlCommand(queryDelete, connection))
                     {
                         commandDelete.Parameters.AddWithValue("@PlanId", planId);
                         int rowsAffected = await commandDelete.ExecuteNonQueryAsync();
-                        if (rowsAffected > 0)
-                        {
-                            TempData["StatusMessage"] = "success";
-                            TempData["Message"] = "Data deleted successfully";
-                            return RedirectToPage();
-                        }
-                        else
-                        {
-                            TempData["StatusMessage"] = "error";
-                            TempData["Message"] = "Data not found";
-                            return RedirectToPage(new
-                            {
-                                FilterDate = CurrentDate.ToString("yyyy-MM-dd"),
-                                FilterMachineCode = FilterMachineCode
-                            });
-                        }
+                        TempData["StatusMessage"] = rowsAffected > 0 ? "success" : "error";
+                        TempData["Message"] = rowsAffected > 0 ? "Data deleted successfully" : "Data not found";
+                        return RedirectToPage();
                     }
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine("Exception: " + ex.ToString());
-
                 TempData["StatusMessage"] = "error";
                 TempData["Message"] = "Error deleting data: " + ex.Message;
                 return Page();
@@ -581,17 +600,14 @@ namespace MonitoringSystem.Pages.Shared
             string QtyHour = Request.Form["QtyHour"];
             string Lot = Request.Form["Lot"];
             string Remark = Request.Form["Remark"];
-
             string Overtime = Request.Form["Overtime"];
             string NoOfDirectWorker = Request.Form["NoOfDirectWorker"];
             string NoOfDirectWorkerOvertime = Request.Form["NoOfDirectWorkerOvertime"];
 
             string targetDateString = Request.Form["TargetDate"];
             DateTime targetDate = DateTime.Now.Date;
-            if (DateTime.TryParse(targetDateString, out DateTime parsedDate))
-            {
-                targetDate = parsedDate;
-            }
+            if (DateTime.TryParse(targetDateString, out DateTime parsedDate)) targetDate = parsedDate;
+
             string shiftValue = "";
             if (Request.Form.ContainsKey("Shift"))
             {
@@ -615,6 +631,7 @@ namespace MonitoringSystem.Pages.Shared
                         }
                     }
 
+                    // Update hanya ProductionRecords (Change Plan), TIDAK menyentuh SapPlan
                     string query = @"UPDATE ProductionRecords 
                              SET ProductName = @ProductName, 
                                  Quantity = @Quantity,
@@ -633,7 +650,6 @@ namespace MonitoringSystem.Pages.Shared
                         command.Parameters.AddWithValue("@WNorm", NoOfDirectWorker ?? (object)DBNull.Value);
                         command.Parameters.AddWithValue("@WOvt", NoOfDirectWorkerOvertime ?? (object)DBNull.Value);
                         command.Parameters.AddWithValue("@Shift", shiftValue);
-
                         command.ExecuteNonQuery();
                     }
                 }
@@ -645,21 +661,14 @@ namespace MonitoringSystem.Pages.Shared
             {
                 TempData["StatusMessage"] = "error";
                 TempData["Message"] = "Error updating data: " + ex.Message;
-                return RedirectToPage(new
-                {
-                    FilterDate = targetDate.ToString("yyyy-MM-dd"),
-                    FilterMachineCode = FilterMachineCode
-                });
+                return RedirectToPage(new { FilterDate = targetDate.ToString("yyyy-MM-dd"), FilterMachineCode = FilterMachineCode });
             }
         }
 
         [HttpPost]
         public async Task<IActionResult> OnPostSubmitCounter([FromBody] SubmitCount submitCount)
         {
-            if (submitCount == null)
-            {
-                return BadRequest();
-            }
+            if (submitCount == null) return BadRequest();
 
             try
             {
@@ -694,10 +703,8 @@ namespace MonitoringSystem.Pages.Shared
             }
         }
 
-
         [HttpGet]
         [Route("/OnGetGetSubmitCounter")]
-
         public async Task<IActionResult> OnGetGetSubmitCounter()
         {
             int submitCount = 0;
@@ -725,6 +732,7 @@ namespace MonitoringSystem.Pages.Shared
             return new JsonResult(new { success = true, count = submitCount });
         }
 
+        // ── UPLOAD EXCEL → INSERT KE SapPlan (BUKAN ProductionRecords) ─────────
         public async Task<IActionResult> OnPostUploadAsync(IFormFile UploadedFile, string TargetMachine, int TargetMonth, int TargetYear)
         {
             if (UploadedFile == null || UploadedFile.Length == 0)
@@ -735,7 +743,6 @@ namespace MonitoringSystem.Pages.Shared
             }
 
             ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
-
             int totalSaved = 0;
             int daysInMonth = DateTime.DaysInMonth(TargetYear, TargetMonth);
 
@@ -759,37 +766,63 @@ namespace MonitoringSystem.Pages.Shared
                                     for (int row = 3; row <= rowCount; row++)
                                     {
                                         string modelName = worksheet.Cells[row, 2].Value?.ToString()?.Trim();
-
                                         if (string.IsNullOrEmpty(modelName)) continue;
+
+                                        // ← TAMBAHAN BARU
+                                        bool isCuMachine = TargetMachine == "MCH1-01";
+                                        bool isCsMachine = TargetMachine == "MCH1-02";
+                                        if (isCuMachine && modelName.StartsWith("CS-", StringComparison.OrdinalIgnoreCase)) continue;
+                                        if (isCsMachine && modelName.StartsWith("CU-", StringComparison.OrdinalIgnoreCase)) continue;
+
+                                        string queryDeleteModel = @"
+        DELETE SP FROM SapPlan SP
+        INNER JOIN ProductionPlan PP ON SP.PlanId = PP.Id
+        WHERE SP.MachineCode = @MachineCode
+        AND SP.ProductName = @ProductName
+        AND MONTH(PP.CurrentDate) = @Month
+        AND YEAR(PP.CurrentDate) = @Year;";
+
+                                        using (SqlCommand cmdDel = new SqlCommand(queryDeleteModel, connection, transaction))
+                                        {
+                                            cmdDel.Parameters.AddWithValue("@MachineCode", TargetMachine);
+                                            cmdDel.Parameters.AddWithValue("@ProductName", modelName);
+                                            cmdDel.Parameters.AddWithValue("@Month", TargetMonth);
+                                            cmdDel.Parameters.AddWithValue("@Year", TargetYear);
+                                            cmdDel.ExecuteNonQuery();
+                                        }
 
                                         for (int day = 1; day <= daysInMonth; day++)
                                         {
+                                            int colBase = 3 + ((day - 1) * 8);
 
-                                            int colNormal = 3 + ((day - 1) * 2);
-                                            int colOvertime = colNormal + 1;
-
-                                            var valNormal = worksheet.Cells[row, colNormal].Value;
-                                            var valOvertime = worksheet.Cells[row, colOvertime].Value;
-
-                                            int qtyNormal = 0;
-                                            int qtyOvertime = 0;
-
-                                            if (valNormal != null) int.TryParse(valNormal.ToString(), out qtyNormal);
-                                            if (valOvertime != null) int.TryParse(valOvertime.ToString(), out qtyOvertime);
-
-                                            if (qtyNormal > 0 || qtyOvertime > 0)
+                                            for (int s = 0; s < ShiftLabels.Length; s++)
                                             {
-                                                DateTime currentDate = new DateTime(TargetYear, TargetMonth, day);
-                                                int planId = GetOrCreatePlanId(connection, transaction, currentDate);
-                                                InsertRecordFromExcel(connection, transaction, planId, modelName, TargetMachine, qtyNormal, qtyOvertime);
-                                                totalSaved++;
+                                                int colNormal = colBase + (s * 2);
+                                                int colOvertime = colNormal + 1;
+
+                                                var valNormal = worksheet.Cells[row, colNormal].Value;
+                                                var valOvertime = worksheet.Cells[row, colOvertime].Value;
+
+                                                int qtyNormal = 0;
+                                                int qtyOvertime = 0;
+                                                if (valNormal != null) int.TryParse(valNormal.ToString(), out qtyNormal);
+                                                if (valOvertime != null) int.TryParse(valOvertime.ToString(), out qtyOvertime);
+
+                                                if (qtyNormal > 0 || qtyOvertime > 0)
+                                                {
+                                                    DateTime currentDate = new DateTime(TargetYear, TargetMonth, day);
+                                                    int planId = GetOrCreatePlanId(connection, transaction, currentDate);
+                                                    InsertSapPlanFromExcel(connection, transaction, planId, modelName, TargetMachine,
+                                                        qtyNormal, qtyOvertime, ShiftLabels[s]);
+                                                    totalSaved++;
+                                                }
                                             }
                                         }
                                     }
 
                                     transaction.Commit();
                                     TempData["StatusMessage"] = "success";
-                                    TempData["Message"] = $"Upload Berhasil! {totalSaved} record produksi berhasil disimpan.";
+                                    TempData["Message"] = $"Upload Berhasil! {totalSaved} SAP Plan record berhasil disimpan.";
                                 }
                                 catch (Exception ex)
                                 {
@@ -814,7 +847,6 @@ namespace MonitoringSystem.Pages.Shared
 
         private int GetOrCreatePlanId(SqlConnection conn, SqlTransaction trans, DateTime date)
         {
-            // Cek apakah Plan ID untuk tanggal ini sudah ada?
             string queryCheck = "SELECT Id FROM ProductionPlan WHERE CurrentDate = @Date";
             using (SqlCommand cmd = new SqlCommand(queryCheck, conn, trans))
             {
@@ -823,7 +855,6 @@ namespace MonitoringSystem.Pages.Shared
                 if (res != null) return (int)res;
             }
 
-            // Jika belum ada, buat baru
             string queryInsert = "INSERT INTO ProductionPlan (CurrentDate) VALUES (@Date); SELECT SCOPE_IDENTITY();";
             using (SqlCommand cmd = new SqlCommand(queryInsert, conn, trans))
             {
@@ -832,22 +863,20 @@ namespace MonitoringSystem.Pages.Shared
             }
         }
 
-        private void InsertRecordFromExcel(SqlConnection conn, SqlTransaction trans, int planId, string modelName, string machineCode, int qty, int ovt)
+        // ── INSERT KE SapPlan (dari Excel) ─────────────────────────────────────
+        private void InsertSapPlanFromExcel(SqlConnection conn, SqlTransaction trans, int planId, string modelName, string machineCode, int normalQty, int overtimeQty, string shift)
         {
             string query = @"
-        IF EXISTS (SELECT 1 FROM ProductionRecords WHERE PlanId = @PlanId AND ProductName = @Pn AND MachineCode = @Mc)
+        IF EXISTS (SELECT 1 FROM SapPlan WHERE PlanId = @PlanId AND ProductName = @Pn AND MachineCode = @Mc AND Shift = @Shift)
         BEGIN
-            UPDATE ProductionRecords 
-            SET Quantity = @Qty, 
-                Overtime = @Ovt
-            WHERE PlanId = @PlanId AND ProductName = @Pn AND MachineCode = @Mc;
+            UPDATE SapPlan 
+            SET SapPlanNormal = @Normal, SapPlanOvertime = @Overtime
+            WHERE PlanId = @PlanId AND ProductName = @Pn AND MachineCode = @Mc AND Shift = @Shift;
         END
         ELSE
         BEGIN
-            INSERT INTO ProductionRecords 
-            (PlanId, ProductName, MachineCode, Quantity, Overtime, NoDirectOfWorker, NoDirectOfWorkerOvertime, Shift) 
-            VALUES 
-            (@PlanId, @Pn, @Mc, @Qty, @Ovt, 0, 0, 'NS');
+            INSERT INTO SapPlan (PlanId, ProductName, MachineCode, SapPlanNormal, SapPlanOvertime, Shift)
+            VALUES (@PlanId, @Pn, @Mc, @Normal, @Overtime, @Shift);
         END";
 
             using (SqlCommand cmd = new SqlCommand(query, conn, trans))
@@ -855,12 +884,9 @@ namespace MonitoringSystem.Pages.Shared
                 cmd.Parameters.AddWithValue("@PlanId", planId);
                 cmd.Parameters.AddWithValue("@Pn", modelName);
                 cmd.Parameters.AddWithValue("@Mc", machineCode);
-                cmd.Parameters.AddWithValue("@Qty", qty);
-
-                // Handle Overtime Nullable
-                if (ovt > 0) cmd.Parameters.AddWithValue("@Ovt", ovt);
-                else cmd.Parameters.AddWithValue("@Ovt", DBNull.Value);
-
+                cmd.Parameters.AddWithValue("@Normal", normalQty);
+                cmd.Parameters.AddWithValue("@Overtime", overtimeQty > 0 ? (object)overtimeQty : DBNull.Value);
+                cmd.Parameters.AddWithValue("@Shift", shift);
                 cmd.ExecuteNonQuery();
             }
         }
@@ -873,7 +899,7 @@ namespace MonitoringSystem.Pages.Shared
             return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "ProductionPlan_Template.xlsx");
         }
 
-
+        // ── CLASSES ─────────────────────────────────────────────────────────────
         public class ProductName
         {
             public string? Name { get; set; }
@@ -892,6 +918,19 @@ namespace MonitoringSystem.Pages.Shared
             public double? Hour { get; set; }
             public string? Lot { get; set; }
             public string? Remark { get; set; }
+            // ← SAP Plan reference (diisi dari join saat load)
+            public int? SapPlanNormal { get; set; }
+            public int? SapPlanOvertime { get; set; }
+        }
+
+        // ← BARU: Class untuk SAP Plan
+        public class SapPlanRecord
+        {
+            public int Id { get; set; }
+            public string? ModelName { get; set; }
+            public int SapPlanNormal { get; set; }
+            public int SapPlanOvertime { get; set; }
+            public string? Shift { get; set; }
         }
 
         public class SubmitCount
