@@ -136,13 +136,11 @@ namespace MonitoringSystem.Pages.ProductionReport
                 foreach (var shift in SelectedShifts)
                 {
                     if (shift == "NS" || shift == "ns")
-                        shiftConditions.Add($"ShiftMode = 'NON-SHIFT'");
-                    else if (shift == "OT" || shift == "OVERTIME")
-                        shiftConditions.Add("ShiftMode = 'OVERTIME'");
+                        shiftConditions.Add("ShiftMode = 'NON-SHIFT' OR ShiftMode = 'OVERTIME'");
                     else
                         shiftConditions.Add(
-    $"ShiftMode = 'SHIFT {shift}' OR ShiftMode='OVERTIME'"
-);
+                            $"ShiftMode = 'SHIFT {shift}' OR ShiftMode = 'OVERTIME SHIFT {shift}'"
+                        );
                 }
                 shiftSelectionSql = $"AND ({string.Join(" OR ", shiftConditions)})";
             }
@@ -295,8 +293,8 @@ MachineDaily AS (
         MAX(CASE WHEN ShiftMode = 'NON-SHIFT' THEN CAST(SDate AS TIME) END) as NS_Time,
         MAX(CASE WHEN ShiftMode = 'NON-SHIFT' THEN TotalUnit END) as NS_MaxUnit,
 
-        SUM(CASE WHEN ShiftMode = 'OVERTIME' THEN DeltaUnit ELSE 0 END) as OT_Unit,
-        MAX(CASE WHEN ShiftMode = 'OVERTIME' THEN CAST(SDate AS TIME) END) as OT_Time,
+SUM(CASE WHEN ShiftMode LIKE 'OVERTIME%' THEN DeltaUnit ELSE 0 END) as OT_Unit,
+MAX(CASE WHEN ShiftMode LIKE 'OVERTIME%' THEN CAST(SDate AS TIME) END) as OT_Time,
 
         MAX(NoOfOperator) as MaxOp,
         MAX(TotalUnit) as TotalUnit
