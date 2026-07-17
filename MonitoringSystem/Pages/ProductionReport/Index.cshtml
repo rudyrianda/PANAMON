@@ -1022,8 +1022,14 @@
                 !Model.SelectedShifts.Any() || Model.SelectedShifts.Contains("All")
             ));
 
+            const isNoShift = @Html.Raw(Json.Serialize(
+                Model.SelectedShifts.Count == 1 && Model.SelectedShifts.Contains("NS")
+            ));
+
             const chartChangePlanData = planData.map((v, i) => {
                 const dayIndex = i + 1;
+                if (isNoShift && dayIndex > 5) return null; // hilangkan untuk NS selain tgl 1-5 sesuai request
+
                 if (v > 0) {
                     // Ada change plan beneran → tampilkan untuk semua shift
                     return effectivePlanData[i];
