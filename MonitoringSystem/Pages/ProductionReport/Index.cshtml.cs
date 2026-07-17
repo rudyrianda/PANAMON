@@ -58,6 +58,9 @@ namespace MonitoringSystem.Pages.ProductionReport
             public int NoOfOperator { get; set; } = 0;
             public int OtOperatorCount { get; set; } = 0;
             public TimeSpan LastOtTime { get; set; } = TimeSpan.Zero;
+            public TimeSpan? OT_S1_Time { get; set; } = null;
+            public TimeSpan? OT_S3_Time { get; set; } = null;
+            public TimeSpan? OT_Normal_Time { get; set; } = null;
         }
 
         public class RestTime { public int Duration { get; set; } public TimeSpan StartTime { get; set; } public TimeSpan EndTime { get; set; } }
@@ -221,85 +224,93 @@ namespace MonitoringSystem.Pages.ProductionReport
 WITH ShiftData AS (
     SELECT
         CASE
-            -- Jam 00:00:00 - 06:59:59 masuk ke hari sebelumnya (Shift Malam)
-            WHEN CAST(SDate AS TIME) < '07:00:00'
-                THEN CAST(DATEADD(DAY, -1, SDate) AS DATE)
+            WHEN CAST(SDate AS TIME) < '07:00:00' THEN CAST(DATEADD(DAY, -1, SDate) AS DATE)
             ELSE CAST(SDate AS DATE)
         END AS ReportDate,
         SDate,
         TotalUnit,
         NoOfOperator,
-        ShiftMode,
-        MachineCode,
-        LAG(TotalUnit) OVER (PARTITION BY MachineCode ORDER BY SDate) AS PreviousUnit,
-        LAG(ShiftMode) OVER (PARTITION BY MachineCode ORDER BY SDate) AS PreviousShiftMode
+        ShiftMode AS Mode_Asli_Mesin,
+        CASE 
+            WHEN ShiftMode = 'NON-SHIFT' THEN
+                CASE 
+                    WHEN MONTH(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 7 AND YEAR(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 2026 AND DAY(CAST(DATEADD(hour, -7, SDate) AS DATE)) <= 5 THEN 'NON-SHIFT'
+                    WHEN CAST(SDate AS TIME) >= '07:00:00' AND CAST(SDate AS TIME) <= '15:45:00' THEN 'SHIFT 1'
+                    WHEN CAST(SDate AS TIME) > '15:45:00' AND CAST(SDate AS TIME) <= '18:00:00' THEN 'OVERTIME SHIFT 1'
+                    WHEN CAST(SDate AS TIME) > '18:00:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+                    ELSE 'SHIFT 3'
+                END
+            WHEN ShiftMode = 'OVERTIME' THEN
+                CASE 
+                    WHEN MONTH(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 7 AND YEAR(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 2026 AND DAY(CAST(DATEADD(hour, -7, SDate) AS DATE)) <= 5 THEN 'OVERTIME'
+                    WHEN CAST(SDate AS TIME) >= '15:45:00' AND CAST(SDate AS TIME) <= '18:00:00' THEN 'OVERTIME SHIFT 1'
+                    WHEN CAST(SDate AS TIME) > '18:00:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+                    WHEN CAST(SDate AS TIME) > '23:15:00' OR CAST(SDate AS TIME) <= '07:00:00' THEN 'SHIFT 3'
+                    ELSE 'OVERTIME'
+                END
+            WHEN ShiftMode = 'SHIFT 2' AND MONTH(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 7 AND YEAR(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 2026 THEN
+                CASE 
+                    WHEN CAST(SDate AS TIME) >= '07:00:00' AND CAST(SDate AS TIME) <= '15:45:00' THEN 'SHIFT 1'
+                    WHEN CAST(SDate AS TIME) > '15:45:00' AND CAST(SDate AS TIME) <= '18:00:00' THEN 'OVERTIME SHIFT 1'
+                    WHEN CAST(SDate AS TIME) > '18:00:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+                    ELSE 'SHIFT 3'
+                END
+            WHEN ShiftMode = 'SHIFT 3' AND CAST(SDate AS TIME) > '18:00:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+            ELSE ShiftMode
+        END AS Status_Di_Web,
+        MachineCode
     FROM oeesn
     WHERE (
-        (YEAR(SDate) = @SelectedYear AND MONTH(SDate) = @SelectedMonth
-         AND CAST(SDate AS TIME) >= '07:00:00')
+        (YEAR(SDate) = @SelectedYear AND MONTH(SDate) = @SelectedMonth AND CAST(SDate AS TIME) >= '07:00:00')
         OR
-        (SDate >= DATEADD(DAY, 1, DATEFROMPARTS(@SelectedYear, @SelectedMonth, 1))
-         AND SDate < DATEADD(MONTH, 1, DATEFROMPARTS(@SelectedYear, @SelectedMonth, 1))
-         AND CAST(SDate AS TIME) < '07:00:00')
+        (SDate >= DATEADD(DAY, 1, DATEFROMPARTS(@SelectedYear, @SelectedMonth, 1)) AND SDate < DATEADD(MONTH, 1, DATEFROMPARTS(@SelectedYear, @SelectedMonth, 1)) AND CAST(SDate AS TIME) < '07:00:00')
     )
     {dateFilter}
     {(MachineLine != "All" ? "AND MachineCode = @MachineLine" : "AND MachineCode IN ('MCH1-01', 'MCH1-02')")}
 ),
-ShiftDataFiltered AS (
+GroupedData AS (
     SELECT 
         ReportDate,
-        SDate,
         MachineCode,
-
-        CASE
-            -- khusus koreksi NON-SHIFT
-            -- kalau database bilang OT tapi masih sebelum jam 16
-            -- dan sebelumnya NON-SHIFT maka tetap NON-SHIFT
-            WHEN ShiftMode = 'OVERTIME'
-                 AND CAST(SDate AS TIME) < '16:00:00'
-                 AND PreviousShiftMode = 'NON-SHIFT'
-            THEN 'NON-SHIFT'
-
-            ELSE ShiftMode
-        END AS ShiftMode,
-
-        NoOfOperator,
-        TotalUnit,
-       CASE
-    WHEN PreviousUnit IS NULL THEN 0
-
-    -- jika counter PLC reset, jangan dihitung sebagai produksi baru
-    WHEN TotalUnit < PreviousUnit THEN 0
-
-    ELSE TotalUnit - PreviousUnit
-END AS DeltaUnit
+        Mode_Asli_Mesin,
+        Status_Di_Web,
+        CASE 
+            WHEN MIN(TotalUnit) = 1 THEN MAX(TotalUnit) 
+            ELSE (MAX(TotalUnit) - MIN(TotalUnit)) 
+        END AS Estimasi_Produksi,
+        MAX(SDate) AS Max_SDate,
+        MAX(NoOfOperator) AS MaxOp
     FROM ShiftData
+    GROUP BY ReportDate, MachineCode, Mode_Asli_Mesin, Status_Di_Web
 ),
 MachineDaily AS (
     SELECT 
         ReportDate,
         MachineCode,
         
-        SUM(CASE WHEN ShiftMode = 'SHIFT 1' THEN DeltaUnit ELSE 0 END) as S1_Unit,
-        MAX(CASE WHEN ShiftMode = 'SHIFT 1' THEN CAST(SDate AS TIME) END) as S1_Time,
+        SUM(CASE WHEN Status_Di_Web = 'SHIFT 1' THEN Estimasi_Produksi ELSE 0 END) as S1_Unit,
+        MAX(CASE WHEN Status_Di_Web = 'SHIFT 1' THEN CAST(Max_SDate AS TIME) END) as S1_Time,
 
-        SUM(CASE WHEN ShiftMode = 'SHIFT 2' THEN DeltaUnit ELSE 0 END) as S2_Unit,
-        MAX(CASE WHEN ShiftMode = 'SHIFT 2' THEN CAST(SDate AS TIME) END) as S2_Time,
+        SUM(CASE WHEN Status_Di_Web = 'SHIFT 2' THEN Estimasi_Produksi ELSE 0 END) as S2_Unit,
+        MAX(CASE WHEN Status_Di_Web = 'SHIFT 2' THEN CAST(Max_SDate AS TIME) END) as S2_Time,
 
-        SUM(CASE WHEN ShiftMode = 'SHIFT 3' THEN DeltaUnit ELSE 0 END) as S3_Unit,
-        MAX(CASE WHEN ShiftMode = 'SHIFT 3' THEN CAST(SDate AS TIME) END) as S3_Time,
+        SUM(CASE WHEN Status_Di_Web = 'SHIFT 3' THEN Estimasi_Produksi ELSE 0 END) as S3_Unit,
+        MAX(CASE WHEN Status_Di_Web = 'SHIFT 3' THEN CAST(Max_SDate AS TIME) END) as S3_Time,
 
-        SUM(CASE WHEN ShiftMode = 'NON-SHIFT' THEN DeltaUnit ELSE 0 END) as NS_Unit,
-        MAX(CASE WHEN ShiftMode = 'NON-SHIFT' THEN CAST(SDate AS TIME) END) as NS_Time,
-        MAX(CASE WHEN ShiftMode = 'NON-SHIFT' THEN TotalUnit END) as NS_MaxUnit,
+        SUM(CASE WHEN Status_Di_Web = 'NON-SHIFT' THEN Estimasi_Produksi ELSE 0 END) as NS_Unit,
+        MAX(CASE WHEN Status_Di_Web = 'NON-SHIFT' THEN CAST(Max_SDate AS TIME) END) as NS_Time,
+        MAX(CASE WHEN Status_Di_Web = 'NON-SHIFT' THEN Estimasi_Produksi END) as NS_MaxUnit,
 
-SUM(CASE WHEN ShiftMode LIKE 'OVERTIME%' THEN DeltaUnit ELSE 0 END) as OT_Unit,
-MAX(CASE WHEN ShiftMode LIKE 'OVERTIME%' THEN CAST(SDate AS TIME) END) as OT_Time,
+        SUM(CASE WHEN Status_Di_Web LIKE 'OVERTIME%' THEN Estimasi_Produksi ELSE 0 END) as OT_Unit,
+        MAX(CASE WHEN Status_Di_Web LIKE 'OVERTIME%' THEN CAST(Max_SDate AS TIME) END) as OT_Time,
+        MAX(CASE WHEN Status_Di_Web = 'OVERTIME SHIFT 1' THEN CAST(Max_SDate AS TIME) END) as OT_S1_Time,
+        MAX(CASE WHEN Status_Di_Web = 'OVERTIME SHIFT 3' THEN CAST(Max_SDate AS TIME) END) as OT_S3_Time,
+        MAX(CASE WHEN Status_Di_Web = 'OVERTIME' THEN CAST(Max_SDate AS TIME) END) as OT_Normal_Time,
 
-        MAX(NoOfOperator) as MaxOp,
-        MAX(TotalUnit) as TotalUnit
-    FROM ShiftDataFiltered
-    WHERE 1=1 {shiftSelectionSql}
+        MAX(MaxOp) as MaxOp,
+        SUM(Estimasi_Produksi) as TotalUnit
+    FROM GroupedData
+    WHERE 1=1 {shiftSelectionSql.Replace("ShiftMode", "Status_Di_Web")}
     GROUP BY ReportDate, MachineCode
 ),
 DailyAggregates AS (
@@ -315,6 +326,9 @@ DailyAggregates AS (
         MAX(NS_Time) as NS_Time,
         SUM(ISNULL(OT_Unit, 0)) as OT_Unit,
         MAX(OT_Time) as OT_Time,
+        MAX(OT_S1_Time) as OT_S1_Time,
+        MAX(OT_S3_Time) as OT_S3_Time,
+        MAX(OT_Normal_Time) as OT_Normal_Time,
         SUM(MaxOp) as MaxOp,
         MAX(TotalUnit) as TotalUnit
     FROM MachineDaily
@@ -392,6 +406,9 @@ SELECT DAY(ReportDate) as Day, * FROM DailyAggregates ORDER BY ReportDate ASC;";
                                     d.NonShift_EndTime = reader["NS_Time"] != DBNull.Value ? (TimeSpan)reader["NS_Time"] : TimeSpan.Zero;
                                     d.Overtime_Unit = reader["OT_Unit"] != DBNull.Value ? Convert.ToDecimal(reader["OT_Unit"]) : 0;
                                     d.Overtime_EndTime = reader["OT_Time"] != DBNull.Value ? (TimeSpan)reader["OT_Time"] : TimeSpan.Zero;
+                                    d.OT_S1_Time = reader["OT_S1_Time"] != DBNull.Value ? (TimeSpan)reader["OT_S1_Time"] : (TimeSpan?)null;
+                                    d.OT_S3_Time = reader["OT_S3_Time"] != DBNull.Value ? (TimeSpan)reader["OT_S3_Time"] : (TimeSpan?)null;
+                                    d.OT_Normal_Time = reader["OT_Normal_Time"] != DBNull.Value ? (TimeSpan)reader["OT_Normal_Time"] : (TimeSpan?)null;
                                     d.NoOfOperator = reader["MaxOp"] != DBNull.Value ? Convert.ToInt32(reader["MaxOp"]) : 0;
                                 }
                             }
@@ -434,42 +451,25 @@ SELECT DAY(ReportDate) as Day, * FROM DailyAggregates ORDER BY ReportDate ASC;";
 
                 int totalOtMinutes = 0;
 
-                if (data.Overtime_Unit > 0)
+                if (data.OT_S1_Time != null)
                 {
-                    TimeSpan workStart = new TimeSpan(7, 0, 0);
-                    if (data.Overtime_EndTime > workStart)
-                        totalOtMinutes = (int)(data.Overtime_EndTime - workStart).TotalMinutes;
-                    else if (data.Overtime_EndTime < workStart)
-                    {
-                        int minutesToMidnight = (int)(new TimeSpan(24, 0, 0) - workStart).TotalMinutes;
-                        int minutesAfterMidnight = (int)data.Overtime_EndTime.TotalMinutes;
-                        totalOtMinutes = minutesToMidnight + minutesAfterMidnight;
-                    }
+                    TimeSpan start = new TimeSpan(15, 45, 0);
+                    if (data.OT_S1_Time > start) totalOtMinutes += (int)(data.OT_S1_Time.Value - start).TotalMinutes;
+                    else totalOtMinutes += (int)(new TimeSpan(24, 0, 0) - start).TotalMinutes + (int)data.OT_S1_Time.Value.TotalMinutes;
                 }
-                else if (data.NonShift_Unit > 0 && data.NonShift_EndTime > new TimeSpan(16, 0, 0))
+
+                if (data.OT_S3_Time != null)
                 {
-                    totalOtMinutes = (int)(data.NonShift_EndTime - new TimeSpan(16, 0, 0)).TotalMinutes;
+                    TimeSpan start = new TimeSpan(18, 0, 0);
+                    if (data.OT_S3_Time > start) totalOtMinutes += (int)(data.OT_S3_Time.Value - start).TotalMinutes;
+                    else totalOtMinutes += (int)(new TimeSpan(24, 0, 0) - start).TotalMinutes + (int)data.OT_S3_Time.Value.TotalMinutes;
                 }
-                else
+
+                if (data.OT_Normal_Time != null)
                 {
-                    if (data.Shift1_EndTime > new TimeSpan(15, 45, 0))
-                        totalOtMinutes += (int)(data.Shift1_EndTime - new TimeSpan(15, 45, 0)).TotalMinutes;
-
-                    if (data.Shift2_EndTime > new TimeSpan(23, 0, 0))
-                    {
-                        if (data.Shift2_EndTime <= new TimeSpan(23, 59, 59))
-                            totalOtMinutes += (int)(data.Shift2_EndTime - new TimeSpan(23, 0, 0)).TotalMinutes;
-                        else if (data.Shift2_EndTime < new TimeSpan(7, 0, 0))
-                        {
-                            int minutesToMidnight = 59;
-                            int minutesAfterMidnight = (int)data.Shift2_EndTime.TotalMinutes;
-                            totalOtMinutes += minutesToMidnight + minutesAfterMidnight;
-                        }
-                    }
-
-                    if (data.Shift3_EndTime > new TimeSpan(7, 0, 0) &&
-                        data.Shift3_EndTime < new TimeSpan(15, 0, 0))
-                        totalOtMinutes += (int)(data.Shift3_EndTime - new TimeSpan(7, 0, 0)).TotalMinutes;
+                    TimeSpan start = new TimeSpan(7, 0, 0);
+                    if (data.OT_Normal_Time > start) totalOtMinutes += (int)(data.OT_Normal_Time.Value - start).TotalMinutes;
+                    else totalOtMinutes += (int)(new TimeSpan(24, 0, 0) - start).TotalMinutes + (int)data.OT_Normal_Time.Value.TotalMinutes;
                 }
 
                 OvertimeMinutes.Add(totalOtMinutes);
@@ -507,7 +507,23 @@ SELECT DAY(ReportDate) as Day, * FROM DailyAggregates ORDER BY ReportDate ASC;";
                 DailyLossTime.Add(lossDurationSec / 60);
 
                 var dayType = DetermineTypeOfDay(new DateTime(SelectedYear, SelectedMonth, data.Day).DayOfWeek);
-                int stdWorkingMinutes = (dayType == "FRIDAY") ? 435 : (dayType == "WEEKEND" ? 0 : 473);
+                
+                int stdWorkingMinutes = 0;
+                if (dayType != "WEEKEND")
+                {
+                    if (data.Shift1_Unit > 0 || data.Shift1_EndTime != TimeSpan.Zero)
+                        stdWorkingMinutes += (dayType == "FRIDAY") ? 435 : 473;
+                        
+                    if (data.Shift2_Unit > 0 || data.Shift2_EndTime != TimeSpan.Zero)
+                        stdWorkingMinutes += 435; // Standard Shift 2
+                        
+                    if (data.Shift3_Unit > 0 || data.Shift3_EndTime != TimeSpan.Zero)
+                        stdWorkingMinutes += 465; // Standard Shift 3
+                        
+                    if (data.NonShift_Unit > 0 || data.NonShift_EndTime != TimeSpan.Zero)
+                        stdWorkingMinutes += (dayType == "FRIDAY") ? 435 : 473; // Standard Non-Shift
+                }
+
                 int baseWorkMinutes = (normalUnits > 0 || overtimeUnits > 0) ? stdWorkingMinutes : 0;
                 DailyWorkTime.Add(baseWorkMinutes + totalOtMinutes);
             }

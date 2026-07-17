@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.EntityFrameworkCore;
 using MonitoringSystem.Models;
@@ -61,18 +61,42 @@ namespace MonitoringSystem.Pages.Inventory
                     ? "" : "AND o.MachineCode = @filterMachine";
 
                 cmd.CommandText = $@"
+                    WITH ShiftData AS (
+                        SELECT 
+                            o.Product_Id,
+                            ISNULL(m.ProductName, o.Product_Id) AS Model,
+                            o.MachineCode,
+                            CAST(DATEADD(hour, -7, o.SDate) AS DATE) AS ReportDate,
+                            o.TotalUnit,
+                            LAG(o.TotalUnit) OVER (PARTITION BY o.MachineCode ORDER BY o.SDate) AS PreviousUnit
+                        FROM OEESN o
+                        LEFT JOIN MasterData m ON m.Product_Id = o.Product_Id
+                        WHERE o.SDate >= DATEADD(hour, 7, @startDate) AND o.SDate < DATEADD(hour, 7, @endDate)
+                        {machineFilter}
+                    ),
+                    ShiftDataFiltered AS (
+                        SELECT 
+                            Product_Id,
+                            Model,
+                            MachineCode,
+                            ReportDate,
+                            CASE
+                                WHEN PreviousUnit IS NULL THEN 0
+                                WHEN TotalUnit < PreviousUnit THEN 0
+                                ELSE TotalUnit - PreviousUnit
+                            END AS DeltaUnit
+                        FROM ShiftData
+                    )
                     SELECT 
-                        o.Product_Id AS Data_Id,
-                        ISNULL(m.ProductName, o.Product_Id) AS Model,
-                        o.MachineCode,
-                        DAY(o.Date) AS DayNum,
-                        (MAX(o.GoodUnit) - MIN(o.GoodUnit) + 1) AS Actual
-                    FROM OEESN o
-                    LEFT JOIN MasterData m ON m.Product_Id = o.Product_Id
-                    WHERE o.Date >= @startDate AND o.Date < @endDate
-                    {machineFilter}
-                    GROUP BY o.Product_Id, m.ProductName, o.MachineCode, DAY(o.Date)
-                    ORDER BY o.MachineCode, m.ProductName, DayNum";
+                        Product_Id AS Data_Id,
+                        Model,
+                        MachineCode,
+                        DAY(ReportDate) AS DayNum,
+                        SUM(DeltaUnit) AS Actual
+                    FROM ShiftDataFiltered
+                    WHERE MONTH(ReportDate) = MONTH(@startDate) AND YEAR(ReportDate) = YEAR(@startDate)
+                    GROUP BY Product_Id, Model, MachineCode, ReportDate
+                    ORDER BY MachineCode, Model, DayNum";
 
                 var pStart = cmd.CreateParameter();
                 pStart.ParameterName = "@startDate";
