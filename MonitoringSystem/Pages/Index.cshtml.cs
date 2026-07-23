@@ -22,7 +22,10 @@ namespace MonitoringSystem.Pages
             _logger = logger;
         }
 
-        public void OnGet() { }
+        public IActionResult OnGet()
+        {
+            return RedirectToPage("/ProductionReport/index");
+        }
 
         public IActionResult OnPostExportToExcel(int month, int year)
         {

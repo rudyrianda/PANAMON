@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.EntityFrameworkCore;
 using MonitoringSystem.Models;
@@ -35,25 +35,111 @@ namespace MonitoringSystem.Pages.Summary
                 var conn = _context.Database.GetDbConnection();
                 await conn.OpenAsync();
 
+                using (var cmdTable = conn.CreateCommand())
+                {
+                    cmdTable.CommandText = @"
+                        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='PwkManualData' AND xtype='U')
+                        BEGIN
+                            CREATE TABLE PwkManualData (
+                                Id INT IDENTITY(1,1) PRIMARY KEY,
+                                ReportDate DATE NOT NULL,
+                                MachineCode VARCHAR(50) NOT NULL,
+                                Product_Id VARCHAR(50) NOT NULL,
+                                ManualCount DECIMAL(18,2) NULL,
+                                LastUpdated DATETIME DEFAULT GETDATE()
+                            )
+                        END";
+                    await cmdTable.ExecuteNonQueryAsync();
+                }
+
                 using var cmd = conn.CreateCommand();
 
                 var machineFilter = string.IsNullOrEmpty(FilterMachineLine)
                     ? "" : "AND o.MachineCode = @filterMachine";
 
                 cmd.CommandText = $@"
+                    WITH ShiftData AS (
+                        SELECT 
+                            o.Product_Id,
+                            ISNULL(m.ProductName, o.Product_Id) AS Model,
+                            o.MachineCode,
+                            CAST(@filterDate AS DATE) AS ReportDate,
+                            o.SDate,
+                            o.TotalUnit,
+                            o.ShiftMode AS Mode_Asli_Mesin,
+                            CASE 
+                                WHEN o.ShiftMode = 'NON-SHIFT' THEN
+                                    CASE 
+                                        WHEN MONTH(CAST(DATEADD(hour, -7, o.SDate) AS DATE)) = 7 AND YEAR(CAST(DATEADD(hour, -7, o.SDate) AS DATE)) = 2026 AND DAY(CAST(DATEADD(hour, -7, o.SDate) AS DATE)) <= 5 THEN 'NON-SHIFT'
+                                        WHEN CAST(o.SDate AS TIME) >= '07:00:00' AND CAST(o.SDate AS TIME) <= '15:45:00' THEN 'SHIFT 1'
+                                        WHEN CAST(o.SDate AS TIME) > '15:45:00' AND CAST(o.SDate AS TIME) <= '18:00:00' THEN 'OVERTIME SHIFT 1'
+                                        WHEN CAST(o.SDate AS TIME) > '18:00:00' AND CAST(o.SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+                                        ELSE 'SHIFT 3'
+                                    END
+                                WHEN o.ShiftMode LIKE 'OVERTIME%' THEN
+                                    CASE 
+                                        WHEN MONTH(CAST(DATEADD(hour, -7, o.SDate) AS DATE)) = 7 AND YEAR(CAST(DATEADD(hour, -7, o.SDate) AS DATE)) = 2026 AND DAY(CAST(DATEADD(hour, -7, o.SDate) AS DATE)) <= 5 THEN 'OVERTIME'
+                                        WHEN CAST(o.SDate AS TIME) >= '15:45:00' AND CAST(o.SDate AS TIME) <= '18:00:00' THEN 'OVERTIME SHIFT 1'
+                                        WHEN CAST(o.SDate AS TIME) > '18:00:00' AND CAST(o.SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+                                        WHEN CAST(o.SDate AS TIME) > '23:15:00' OR CAST(o.SDate AS TIME) <= '07:00:00' THEN 'SHIFT 3'
+                                        ELSE 'OVERTIME'
+                                    END
+                                WHEN o.ShiftMode = 'SHIFT 2' AND MONTH(CAST(DATEADD(hour, -7, o.SDate) AS DATE)) = 7 AND YEAR(CAST(DATEADD(hour, -7, o.SDate) AS DATE)) = 2026 THEN
+                                    CASE 
+                                        WHEN CAST(o.SDate AS TIME) >= '07:00:00' AND CAST(o.SDate AS TIME) <= '15:45:00' THEN 'SHIFT 1'
+                                        WHEN CAST(o.SDate AS TIME) > '15:45:00' AND CAST(o.SDate AS TIME) <= '18:00:00' THEN 'OVERTIME SHIFT 1'
+                                        WHEN CAST(o.SDate AS TIME) > '18:00:00' AND CAST(o.SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+                                        ELSE 'SHIFT 3'
+                                    END
+                                WHEN o.ShiftMode = 'SHIFT 3' AND CAST(o.SDate AS TIME) > '18:00:00' AND CAST(o.SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+                                ELSE o.ShiftMode
+                            END AS Status_Di_Web,
+                            o.SN_GOOD
+                        FROM OEESN o
+                        LEFT JOIN MasterData m ON m.Product_Id = o.Product_Id
+                        WHERE o.SDate >= DATEADD(HOUR, 7, @filterDate)
+                          AND o.SDate < DATEADD(HOUR, 31, @filterDate)
+                        {machineFilter}
+                    ),
+                    LaggedData AS (
+                        SELECT 
+                            Product_Id,
+                            Model,
+                            MachineCode,
+                            ReportDate,
+                            TotalUnit,
+                            SN_GOOD,
+                            LAG(TotalUnit) OVER (PARTITION BY ReportDate, MachineCode, Mode_Asli_Mesin, Status_Di_Web ORDER BY SDate) AS PreviousUnit
+                        FROM ShiftData
+                    ),
+                    ShiftDataFiltered AS (
+                        SELECT 
+                            Product_Id,
+                            Model,
+                            MachineCode,
+                            ReportDate,
+                            SN_GOOD,
+                            CASE
+                                WHEN PreviousUnit IS NULL THEN 0
+                                WHEN TotalUnit < PreviousUnit THEN 0
+                                ELSE TotalUnit - PreviousUnit
+                            END AS DeltaUnit
+                        FROM LaggedData
+                    )
                     SELECT 
                         o.Product_Id AS Data_Id,
-                        ISNULL(m.ProductName, o.Product_Id) AS Model,
-                        (MAX(o.GoodUnit) - MIN(o.GoodUnit) + 1) AS Actual,
+                        o.Model,
+                        SUM(o.DeltaUnit) AS Actual,
                         o.MachineCode,
                         MIN(o.SN_GOOD) AS SerialFirst,
-                        MAX(o.SN_GOOD) AS SerialLast
-                    FROM OEESN o
-                    LEFT JOIN MasterData m ON m.Product_Id = o.Product_Id
-                    WHERE CAST(o.Date AS DATE) = @filterDate
-                    {machineFilter}
-                    GROUP BY o.Product_Id, m.ProductName, o.MachineCode
-                    ORDER BY o.MachineCode, m.ProductName";
+                        MAX(o.SN_GOOD) AS SerialLast,
+                        MAX(pmd.ManualCount) AS ManualPwk
+                    FROM ShiftDataFiltered o
+                    LEFT JOIN PwkManualData pmd ON pmd.ReportDate = CAST(@filterDate AS DATE) 
+                                               AND pmd.MachineCode = o.MachineCode 
+                                               AND pmd.Product_Id = o.Product_Id
+                    GROUP BY o.Product_Id, o.Model, o.MachineCode
+                    ORDER BY o.MachineCode, o.Model";
 
                 var pDate = cmd.CreateParameter();
                 pDate.ParameterName = "@filterDate";
@@ -78,6 +164,7 @@ namespace MonitoringSystem.Pages.Summary
                         Data_Id = reader["Data_Id"]?.ToString(),
                         Model = reader["Model"]?.ToString(),
                         Actual = reader["Actual"] == DBNull.Value ? null : Convert.ToDecimal(reader["Actual"]),
+                        ManualPwk = reader["ManualPwk"] == DBNull.Value ? null : Convert.ToDecimal(reader["ManualPwk"]),
                         MachineLine = reader["MachineCode"]?.ToString(),
                         SerialFirst = reader["SerialFirst"]?.ToString(),
                         SerialLast = reader["SerialLast"]?.ToString()
@@ -109,7 +196,8 @@ namespace MonitoringSystem.Pages.Summary
                 cmd.CommandText = @"
                     SELECT SN_GOOD
                     FROM OEESN
-                    WHERE CAST(Date AS DATE) = @filterDate
+                    WHERE SDate >= DATEADD(HOUR, 7, @filterDate)
+                      AND SDate < DATEADD(HOUR, 31, @filterDate)
                       AND Product_Id = @productId
                       AND MachineCode = @machineCode
                       AND SN_GOOD IS NOT NULL
@@ -179,10 +267,11 @@ namespace MonitoringSystem.Pages.Summary
                 cmdRef.CommandText = @"
                     SELECT TOP 1 *
                     FROM OEESN
-                    WHERE CAST(Date AS DATE) = @filterDate
+                    WHERE SDate >= DATEADD(HOUR, 7, @filterDate)
+                      AND SDate < DATEADD(HOUR, 31, @filterDate)
                       AND Product_Id = @productId
                       AND MachineCode = @machineCode
-                    ORDER BY Date DESC";
+                    ORDER BY SDate DESC";
 
                 var pr1 = cmdRef.CreateParameter(); pr1.ParameterName = "@filterDate";
                 pr1.Value = DateTime.Parse(req.FilterDate).Date;
@@ -236,10 +325,11 @@ namespace MonitoringSystem.Pages.Summary
                         @productId, @machineCode, @snGood, @insertDate, ShiftMode, GoodUnit
                     FROM (SELECT TOP 1 ShiftMode, GoodUnit 
                           FROM OEESN 
-                          WHERE CAST(Date AS DATE) = @filterDate2
+                          WHERE SDate >= DATEADD(HOUR, 7, @filterDate2)
+                            AND SDate < DATEADD(HOUR, 31, @filterDate2)
                             AND Product_Id = @productId2
                             AND MachineCode = @machineCode2
-                          ORDER BY Date DESC) AS ref";
+                          ORDER BY SDate DESC) AS ref";
 
                 var pi1 = cmdIns.CreateParameter(); pi1.ParameterName = "@productId"; pi1.Value = req.ProductId;
                 var pi2 = cmdIns.CreateParameter(); pi2.ParameterName = "@machineCode"; pi2.Value = req.MachineCode;
@@ -269,10 +359,53 @@ namespace MonitoringSystem.Pages.Summary
         public async Task<IActionResult> OnPostSavePwkAsync(
             List<string> Model,
             List<string> Actual,
-            List<string> DataId)
+            List<string> ManualPwk,
+            List<string> DataId,
+            List<string> MachineLine)
         {
             try
             {
+                var conn = _context.Database.GetDbConnection();
+                await conn.OpenAsync();
+
+                var query = @"
+                    IF EXISTS (SELECT 1 FROM PwkManualData WHERE ReportDate = @date AND MachineCode = @mc AND Product_Id = @pid)
+                    BEGIN
+                        UPDATE PwkManualData SET ManualCount = @val, LastUpdated = GETDATE()
+                        WHERE ReportDate = @date AND MachineCode = @mc AND Product_Id = @pid
+                    END
+                    ELSE
+                    BEGIN
+                        INSERT INTO PwkManualData (ReportDate, MachineCode, Product_Id, ManualCount)
+                        VALUES (@date, @mc, @pid, @val)
+                    END";
+
+                for (int i = 0; i < DataId.Count; i++)
+                {
+                    if (string.IsNullOrEmpty(DataId[i]) || string.IsNullOrEmpty(MachineLine[i])) continue;
+
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = query;
+
+                    var pDate = cmd.CreateParameter(); pDate.ParameterName = "@date"; 
+                    pDate.Value = string.IsNullOrEmpty(FilterDate) ? DateTime.Now.Date : DateTime.Parse(FilterDate).Date; 
+                    cmd.Parameters.Add(pDate);
+                    
+                    var pMc = cmd.CreateParameter(); pMc.ParameterName = "@mc"; pMc.Value = MachineLine[i]; cmd.Parameters.Add(pMc);
+                    var pPid = cmd.CreateParameter(); pPid.ParameterName = "@pid"; pPid.Value = DataId[i]; cmd.Parameters.Add(pPid);
+
+                    var pVal = cmd.CreateParameter(); pVal.ParameterName = "@val";
+                    if (i < ManualPwk.Count && decimal.TryParse(ManualPwk[i], out decimal val))
+                        pVal.Value = val;
+                    else
+                        pVal.Value = DBNull.Value;
+                    cmd.Parameters.Add(pVal);
+
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                await conn.CloseAsync();
+
                 TempData["StatusMessage"] = "success";
                 TempData["Message"] = "Data PWK berhasil disimpan!";
             }
@@ -312,6 +445,7 @@ namespace MonitoringSystem.Pages.Summary
         public string Data_Id { get; set; }
         public string Model { get; set; }
         public decimal? Actual { get; set; }
+        public decimal? ManualPwk { get; set; }
         public string MachineLine { get; set; }
         public string SerialFirst { get; set; }
         public string SerialLast { get; set; }

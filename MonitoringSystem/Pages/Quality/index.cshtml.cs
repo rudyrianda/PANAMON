@@ -82,11 +82,11 @@ namespace MonitoringSystem.Pages.Quality
         {
             if (string.IsNullOrEmpty(MachineCode))
             {
-                MachineCode = "Line1";
+                MachineCode = "MCH1-01";
             }
             if (string.IsNullOrEmpty(StartDate))
             {
-                StartDate = DateTime.Now.ToString("yyyy-MM-dd");
+                StartDate = new DateTime(DateTime.Now.Year, DateTime.Now.Month, 1).ToString("yyyy-MM-dd");
                 EndDate = DateTime.Now.ToString("yyyy-MM-dd");
             }
             LoadData();
@@ -335,29 +335,15 @@ namespace MonitoringSystem.Pages.Quality
                         }
                     }
 
-                    List<string> masterStations = new List<string>();
-
-                    if (MachineCode == "Line1" || MachineCode == "Line2" || MachineCode == "Line3")
-                    {
-                        masterStations = new List<string> {
-                            "PREPARING",
-                            "GAS LEAK",
-                            "STARTING - RUNNING",
-                            "INNER",
-                            "FINAL",
-                            "DETAIL"
-                        };
-                    }
-                    else if (MachineCode == "Line4" || MachineCode == "Line5" ||
-                             MachineCode == "Line6" || MachineCode == "Line7")
-                    {
-                        masterStations = new List<string> {
-                            "Chassis",
-                            "Preparing",
-                            "Running",
-                            "Final"
-                        };
-                    }
+                    List<string> masterStations = new List<string> {
+                        "Chassis",
+                        "PREPARING",
+                        "GAS LEAK",
+                        "STARTING - RUNNING",
+                        "INNER",
+                        "FINAL",
+                        "DETAIL"
+                    };
 
                     if (string.IsNullOrEmpty(Station))
                     {

@@ -236,26 +236,26 @@ WITH ShiftData AS (
                 CASE 
                     WHEN MONTH(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 7 AND YEAR(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 2026 AND DAY(CAST(DATEADD(hour, -7, SDate) AS DATE)) <= 5 THEN 'NON-SHIFT'
                     WHEN CAST(SDate AS TIME) >= '07:00:00' AND CAST(SDate AS TIME) <= '15:45:00' THEN 'SHIFT 1'
-                    WHEN CAST(SDate AS TIME) > '15:45:00' AND CAST(SDate AS TIME) <= '18:00:00' THEN 'OVERTIME SHIFT 1'
-                    WHEN CAST(SDate AS TIME) > '18:00:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+                    WHEN CAST(SDate AS TIME) > '15:45:00' AND CAST(SDate AS TIME) <= '19:45:00' THEN 'OVERTIME SHIFT 1'
+                    WHEN CAST(SDate AS TIME) > '19:45:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
                     ELSE 'SHIFT 3'
                 END
             WHEN ShiftMode LIKE 'OVERTIME%' THEN
                 CASE 
                     WHEN MONTH(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 7 AND YEAR(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 2026 AND DAY(CAST(DATEADD(hour, -7, SDate) AS DATE)) <= 5 THEN 'OVERTIME'
-                    WHEN CAST(SDate AS TIME) >= '15:45:00' AND CAST(SDate AS TIME) <= '18:00:00' THEN 'OVERTIME SHIFT 1'
-                    WHEN CAST(SDate AS TIME) > '18:00:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+                    WHEN CAST(SDate AS TIME) >= '15:45:00' AND CAST(SDate AS TIME) <= '19:45:00' THEN 'OVERTIME SHIFT 1'
+                    WHEN CAST(SDate AS TIME) > '19:45:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
                     WHEN CAST(SDate AS TIME) > '23:15:00' OR CAST(SDate AS TIME) <= '07:00:00' THEN 'SHIFT 3'
                     ELSE 'OVERTIME'
                 END
             WHEN ShiftMode = 'SHIFT 2' AND MONTH(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 7 AND YEAR(CAST(DATEADD(hour, -7, SDate) AS DATE)) = 2026 THEN
                 CASE 
                     WHEN CAST(SDate AS TIME) >= '07:00:00' AND CAST(SDate AS TIME) <= '15:45:00' THEN 'SHIFT 1'
-                    WHEN CAST(SDate AS TIME) > '15:45:00' AND CAST(SDate AS TIME) <= '18:00:00' THEN 'OVERTIME SHIFT 1'
-                    WHEN CAST(SDate AS TIME) > '18:00:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+                    WHEN CAST(SDate AS TIME) > '15:45:00' AND CAST(SDate AS TIME) <= '19:45:00' THEN 'OVERTIME SHIFT 1'
+                    WHEN CAST(SDate AS TIME) > '19:45:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
                     ELSE 'SHIFT 3'
                 END
-            WHEN ShiftMode = 'SHIFT 3' AND CAST(SDate AS TIME) > '18:00:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
+            WHEN ShiftMode = 'SHIFT 3' AND CAST(SDate AS TIME) > '19:45:00' AND CAST(SDate AS TIME) <= '23:15:00' THEN 'OVERTIME SHIFT 3'
             ELSE ShiftMode
         END AS Status_Di_Web,
         MachineCode
@@ -454,13 +454,34 @@ SELECT DAY(ReportDate) as Day, * FROM DailyAggregates ORDER BY ReportDate ASC;";
                 if (data.OT_S1_Time != null)
                 {
                     TimeSpan start = new TimeSpan(15, 45, 0);
-                    if (data.OT_S1_Time > start) totalOtMinutes += (int)(data.OT_S1_Time.Value - start).TotalMinutes;
-                    else totalOtMinutes += (int)(new TimeSpan(24, 0, 0) - start).TotalMinutes + (int)data.OT_S1_Time.Value.TotalMinutes;
+                    TimeSpan breakStart = new TimeSpan(18, 15, 0);
+                    TimeSpan breakEnd = new TimeSpan(18, 45, 0);
+                    TimeSpan endTime = data.OT_S1_Time.Value;
+
+                    if (endTime > start)
+                    {
+                        if (endTime <= breakStart)
+                        {
+                            totalOtMinutes += (int)(endTime - start).TotalMinutes;
+                        }
+                        else if (endTime > breakStart && endTime <= breakEnd)
+                        {
+                            totalOtMinutes += (int)(breakStart - start).TotalMinutes;
+                        }
+                        else
+                        {
+                            totalOtMinutes += (int)(endTime - start).TotalMinutes - 30; // Kurangi 30 menit istirahat
+                        }
+                    }
+                    else 
+                    {
+                        totalOtMinutes += (int)(new TimeSpan(24, 0, 0) - start).TotalMinutes + (int)endTime.TotalMinutes - 30;
+                    }
                 }
 
                 if (data.OT_S3_Time != null)
                 {
-                    TimeSpan start = new TimeSpan(18, 0, 0);
+                    TimeSpan start = new TimeSpan(19, 45, 0);
                     if (data.OT_S3_Time > start) totalOtMinutes += (int)(data.OT_S3_Time.Value - start).TotalMinutes;
                     else totalOtMinutes += (int)(new TimeSpan(24, 0, 0) - start).TotalMinutes + (int)data.OT_S3_Time.Value.TotalMinutes;
                 }
