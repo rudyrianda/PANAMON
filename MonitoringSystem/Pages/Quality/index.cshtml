@@ -1,4 +1,4 @@
-﻿@page
+@page
 @model MonitoringSystem.Pages.Quality.QualityModel
 @{
     ViewData["Title"] = "Pass Through Ratio";
@@ -36,37 +36,22 @@
                     <label class="fw-semibold" style="font-size: 0.9rem; color: var(--panasonic-blue); margin-bottom: 8px; display: block;">SELECT LINE</label>
                     <select class="form-control" id="machineDropdown" style="background-color: white; border: 2px solid var(--panasonic-blue); color: var(--text-dark); padding: 8px; border-radius: 5px; margin-bottom: 10px;" onchange="document.getElementById('selectedMachineCode').value = this.value; this.form.submit();">
                         <option value="">-- Choose Line --</option>
-                        <option value="Line1" selected="@(Model.MachineCode == "Line1")">Line 1</option>
-                        <option value="Line2" selected="@(Model.MachineCode == "Line2")">Line 2</option>
-                        <option value="Line3" selected="@(Model.MachineCode == "Line3")">Line 3</option>
-                        <option value="Line4" selected="@(Model.MachineCode == "Line4")">Line 4</option>
-                        <option value="Line5" selected="@(Model.MachineCode == "Line5")">Line 5</option>
-                        <option value="Line6" selected="@(Model.MachineCode == "Line6")">Line 6</option>
-                        <option value="Line7" selected="@(Model.MachineCode == "Line7")">Line 7</option>
+                        <option value="MCH1-01" selected="@(Model.MachineCode == "MCH1-01")">Line CU (MCH1-01)</option>
+                        <option value="MCH1-02" selected="@(Model.MachineCode == "MCH1-02")">Line CS (MCH1-02)</option>
                     </select>
                 </div>
 
                 <div class="grid-border">
                     <div class="section-title" style="font-size:1rem;">STATION</div>
                     <div class="btn-custom-group">
-                        @if (Model.MachineCode == "Line1" || Model.MachineCode == "Line2" || Model.MachineCode == "Line3")
-                        {
                             <button type="submit" name="Station" value="" class="@(string.IsNullOrEmpty(Model.Station) ? "btn-blue-active" : "btn-outline-inactive")">ALL STATION</button>
+                            <button type="submit" name="Station" value="Chassis" class="@(Model.Station == "Chassis" ? "btn-blue-active" : "btn-outline-inactive")">CHASSIS</button>
                             <button type="submit" name="Station" value="PREPARING" class="@(Model.Station == "PREPARING" ? "btn-blue-active" : "btn-outline-inactive")">PREPARING</button>
                             <button type="submit" name="Station" value="GAS LEAK" class="@(Model.Station == "GAS LEAK" ? "btn-blue-active" : "btn-outline-inactive")">GAS LEAK</button>
                             <button type="submit" name="Station" value="STARTING - RUNNING" class="@(Model.Station == "STARTING - RUNNING" ? "btn-blue-active" : "btn-outline-inactive")">RUNNING</button>
                             <button type="submit" name="Station" value="INNER" class="@(Model.Station == "INNER" ? "btn-blue-active" : "btn-outline-inactive")">INNER</button>
                             <button type="submit" name="Station" value="FINAL" class="@(Model.Station == "FINAL" ? "btn-blue-active" : "btn-outline-inactive")">FINAL</button>
                             <button type="submit" name="Station" value="DETAIL" class="@(Model.Station == "DETAIL" ? "btn-blue-active" : "btn-outline-inactive")">DETAIL</button>
-                        }
-                        else
-                        {
-                            <button type="submit" name="Station" value="" class="@(string.IsNullOrEmpty(Model.Station) ? "btn-blue-active" : "btn-outline-inactive")">ALL STATION</button>
-                            <button type="submit" name="Station" value="Chassis" class="@(Model.Station == "Chassis" ? "btn-blue-active" : "btn-outline-inactive")">CHASSIS</button>
-                            <button type="submit" name="Station" value="Preparing" class="@(Model.Station == "Preparing" ? "btn-blue-active" : "btn-outline-inactive")">PREPARING</button>
-                            <button type="submit" name="Station" value="Running" class="@(Model.Station == "Running" ? "btn-blue-active" : "btn-outline-inactive")">RUNNING</button>
-                            <button type="submit" name="Station" value="Final" class="@(Model.Station == "Final" ? "btn-blue-active" : "btn-outline-inactive")">FINAL</button>
-                        }
                     </div>
                 </div>
 
